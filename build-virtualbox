@@ -1,0 +1,80 @@
+#!/bin/bash
+
+set -e
+
+[ -z "${SERIAL_PORT}" ] && SERIAL_PORT=22023
+[ -z "${OPENWRT_VERSION}" ] && OPENWRT_VERSION="19.07.7"
+OPENWRT_IMAGE="openwrt-${OPENWRT_VERSION}-x86-64-combined-ext4.img"
+OPENWRT_IMAGEGZ_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/x86/64/${OPENWRT_IMAGE}.gz"
+OPENWRT_BOX="OpenWRT-${OPENWRT_VERSION}.box"
+
+VM_NAME="$(mktemp -u OpenWRT-vagrant-base-XXXXXX)"
+
+if [ -e "${OPENWRT_BOX}" ] ; then
+    echo "OpenWRT Box for ${OPENWRT_VERSION} already exists as file ${OPENWRT_BOX}" 
+    exit 1
+fi
+
+if ! [ -e "${OPENWRT_IMAGE}" ] ; then
+    echo "Download OpenWRT image version ${OPENWRT_VERSION}"
+    wget -o - ${OPENWRT_IMAGEGZ_URL}
+    gunzip "${OPENWRT_IMAGE}"
+else
+    echo "Using existing OpenWRT image version ${OPENWRT_VERSION}"
+fi
+
+echo "Converting RAW image into VDI image for working VM"
+VBoxManage convertfromraw "${OPENWRT_IMAGE}" "${VM_NAME}.vdi" --format VDI
+
+echo "Creating a build VM ${VM_NAME}"
+VBoxManage createvm \
+    --register \
+    --name "${VM_NAME}" \
+    --ostype Linux_64
+VBoxManage modifyvm "${VM_NAME}" \
+    --memory 256 \
+    --vram 64 \
+    --longmode on \
+    --bioslogofadein off --bioslogofadeout off --boot1 disk --boot2 none --boot3 none \
+    --audio none \
+    --nic1 nat --nictype1 virtio --cableconnected1 on \
+    --uart1 0x3F8 4 --uartmode1 tcpserver "${SERIAL_PORT}"
+VBoxManage storagectl "${VM_NAME}" \
+    --name storage \
+    --add sata \
+    --controller IntelAHCI \
+     --portcount 2
+VBoxManage storageattach "${VM_NAME}" \
+    --storagectl storage \
+    --port 0 \
+    --type hdd \
+    --medium "${VM_NAME}.vdi"
+
+echo "Starting VM ${VM_NAME}"
+VBoxManage startvm "${VM_NAME}" \
+    --type headless
+
+echo "Waiting till OpenWRT has started"
+sleep 30
+
+echo "Starting setup"
+cat setup-box.sh |socat stdin "tcp4-connect:localhost:${SERIAL_PORT}"
+       
+while true ; do
+    [ -z "$(VBoxManage list runningvms |grep \"${VM_NAME}\")" ] && break
+    echo "Waiting for end of setup"
+    sleep 5
+done
+
+echo "Exporting OpenWRT vagrant box"
+vagrant package \
+    --no-tty \
+    --base "${VM_NAME}" \
+    --vagrantfile Vagrantfile \
+    --output "OpenWRT-${OPENWRT_VERSION}.box"
+sha256sum "${OPENWRT_BOX}" |cut -f 1 >>"${OPENWRT_BOX}.sha256"
+sha384sum "${OPENWRT_BOX}" |cut -f 1 >>"${OPENWRT_BOX}.sha385"
+sha512sum "${OPENWRT_BOX}" |cut -f 1 >>"${OPENWRT_BOX}.sha512"
+
+echo "Deleting build VM ${VM_NAME} and VDI image"
+VBoxManage unregistervm "${VM_NAME}" --delete

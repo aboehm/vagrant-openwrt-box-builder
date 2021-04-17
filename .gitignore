@@ -1,0 +1,9 @@
+# Vagrant
+/.vagrant
+
+# Build
+/openwrt-*.img
+/OpenWRT-*.vdi
+/OpenWRT-*.box
+/OpenWRT-*.box.sha*
+/serial0
