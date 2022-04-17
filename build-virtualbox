@@ -1,29 +1,131 @@
 #!/bin/bash
 
+# Vagrant (Virtual Box) Box creater for OpenWRT
+# Copyright (C) 2021 Alexander Böhm <alexander.boehm@malbolge.net>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 set -e
 
-[ -z "${SERIAL_PORT}" ] && SERIAL_PORT=22023
-[ -z "${OPENWRT_VERSION}" ] && OPENWRT_VERSION="19.07.7"
-OPENWRT_IMAGE="openwrt-${OPENWRT_VERSION}-x86-64-combined-ext4.img"
-OPENWRT_IMAGEGZ_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/x86/64/${OPENWRT_IMAGE}.gz"
-OPENWRT_BOX="OpenWRT-${OPENWRT_VERSION}.box"
+print_help() {
+    echo "Vagrant (Virtual Box) Box creater for OpenWRT" 
+    echo "Syntax: $0 (-u <URL> | -i <IMAGE>) -b <BOX>"
+    echo ""
+    echo "\t-u <URL>   URL where to download combined OpenWRT image"
+    echo "\t-b <BOX>   Path where to save the Vagrant BOX"
+    echo "\t-i <IMAGE> Path to the base image used for box creation"
+    echo ""
+}
 
-VM_NAME="$(mktemp -u OpenWRT-vagrant-base-XXXXXX)"
+check_prog() {
+    if [ -z "$(which $1)" ] ; then
+        echo "Can't find $1 in PATH. Please install it and make it available via PATH"
+        exit 1
+    fi
+}
 
-if [ -e "${OPENWRT_BOX}" ] ; then
-    echo "OpenWRT Box for ${OPENWRT_VERSION} already exists as file ${OPENWRT_BOX}" 
+VM_NAME=$(mktemp -u OpenWRT-vagrant-base-XXXXXX)
+
+OPTIND=1
+while getopts 'h?u:b:i:' OPT ; do
+    case "${OPT}" in
+        h|\?)
+            print_help
+            exit 0
+            ;;
+        u)
+            OPENWRT_IMAGEZ_URL="${OPTARG}"
+            ;;
+        i)
+            OPENWRT_IMAGE="${OPTARG}"
+            ;;
+        b)
+            OPENWRT_BOX="${OPTARG}"
+            ;;
+    esac
+done
+
+if [ -z "${OPENWRT_IMAGEZ_URL}" ] && [ -z "${OPENWRT_IMAGE}" ] ; then
+    echo "Please set source URL or file for the OpenWRT combined image"
+    print_help
     exit 1
 fi
 
-if ! [ -e "${OPENWRT_IMAGE}" ] ; then
-    echo "Download OpenWRT image version ${OPENWRT_VERSION}"
-    wget -o - ${OPENWRT_IMAGEGZ_URL}
-    gunzip "${OPENWRT_IMAGE}"
+if [ -z "${OPENWRT_IMAGE}" ] && [ "${OPENWRT_IMAGEZ_URL}" ] ; then
+    OPENWRT_IMAGE=$(sed 's/^.*\/\([^/]\+\)\.\(bz2\|gz\|lz\|lz4\|xz\)/\1/g' <<<${OPENWRT_IMAGEZ_URL})
+fi
+
+if [ -e "${OPENWRT_BOX}" ] ; then
+    echo "Box ${OPENWRT_BOX} already exists. Choose another path or delete the box."
+    echo ""
+    print_help
+    exit 1
+fi
+
+[ -z "${SERIAL_PORT}" ] && SERIAL_PORT=22023
+
+# check programs
+check_prog expect
+check_prog socat
+check_prog sha256sum
+check_prog sha384sum
+check_prog sha512sum
+check_prog vagrant
+check_prog VBoxManage
+
+if [ -e "${OPENWRT_IMAGE}" ] ; then
+    echo "Using existing OpenWRT image ${OPENWRT_IMAGE}"
 else
-    echo "Using existing OpenWRT image version ${OPENWRT_VERSION}"
+    echo "Download OpenWRT image from ${OPENWRT_IMAGEZ_URL}"
+
+    check_prog wget
+    wget --quiet "${OPENWRT_IMAGEZ_URL}"
+
+    EXT=$(sed 's/^.*\.\([a-zA-Z0-9]\+\)$/\1/' <<<${OPENWRT_IMAGEZ_URL})
+    FILE=$(sed 's/^.*\/\([^/]\+\)/\1/g' <<<${OPENWRT_IMAGEZ_URL})
+
+    case "${EXT}" in
+        gz|GZ)
+            check_prog gunzip
+            set +e
+            gunzip -c "${FILE}" >"${OPENWRT_IMAGE}"
+            set -e
+            ;;
+        xz|XZ)
+            check_prog unxz
+            unxz -c "${FILE}" >"${OPENWRT_IMAGE}"
+            ;;
+        bz2|BZ2)
+            check_prog bunzip2
+            bunzip2 -c "${FILE}" >"${OPENWRT_IMAGE}"
+            ;;
+        lz|LZ)
+            check_prog unlzma
+            unlzma -c "${FILE}" >"${OPENWRT_IMAGE}"
+            ;;
+        lz4|LZ4)
+            check_prog unlz4
+            unlz4 -c "${FILE}" >"${OPENWRT_IMAGE}"
+            ;;
+        *)
+            mv "${FILE}" "${OPENWRT_IMAGE}"
+            ;;
+    esac
 fi
 
 echo "Converting RAW image into VDI image for working VM"
+truncate -s 256M "${OPENWRT_IMAGE}"
 VBoxManage convertfromraw "${OPENWRT_IMAGE}" "${VM_NAME}.vdi" --format VDI
 
 echo "Creating a build VM ${VM_NAME}"
@@ -31,19 +133,24 @@ VBoxManage createvm \
     --register \
     --name "${VM_NAME}" \
     --ostype Linux_64
+echo "Configure some basic parameters for the VM"
 VBoxManage modifyvm "${VM_NAME}" \
     --memory 256 \
     --vram 64 \
     --longmode on \
     --bioslogofadein off --bioslogofadeout off --boot1 disk --boot2 none --boot3 none \
     --audio none \
-    --nic1 nat --nictype1 virtio --cableconnected1 on \
+    --nic1 nat --nictype1 virtio --cableconnected1 on
+echo "Enable access to UART via a TCP port ${SERIAL_PORT}"
+VBoxManage modifyvm "${VM_NAME}" \
     --uart1 0x3F8 4 --uartmode1 tcpserver "${SERIAL_PORT}"
+echo "Add astorage controller to VM"
 VBoxManage storagectl "${VM_NAME}" \
     --name storage \
     --add sata \
     --controller IntelAHCI \
      --portcount 2
+echo "Attach disk ${VM_NAME}.vdi to the storage controller"
 VBoxManage storageattach "${VM_NAME}" \
     --storagectl storage \
     --port 0 \
@@ -54,27 +161,33 @@ echo "Starting VM ${VM_NAME}"
 VBoxManage startvm "${VM_NAME}" \
     --type headless
 
-echo "Waiting till OpenWRT has started"
-sleep 30
-
 echo "Starting setup"
-cat setup-box.sh |socat stdin "tcp4-connect:localhost:${SERIAL_PORT}"
+./setup-box.exp
        
 while true ; do
     [ -z "$(VBoxManage list runningvms |grep \"${VM_NAME}\")" ] && break
     echo "Waiting for end of setup"
-    sleep 5
+    sleep 1
 done
+
+sleep 3
+echo "Disable access to UART ${SERIAL_PORT} via a TCP port"
+VBoxManage modifyvm "${VM_NAME}" \
+    --uartmode1 disconnected
 
 echo "Exporting OpenWRT vagrant box"
 vagrant package \
     --no-tty \
     --base "${VM_NAME}" \
     --vagrantfile Vagrantfile \
-    --output "OpenWRT-${OPENWRT_VERSION}.box"
-sha256sum "${OPENWRT_BOX}" |cut -f 1 >>"${OPENWRT_BOX}.sha256"
-sha384sum "${OPENWRT_BOX}" |cut -f 1 >>"${OPENWRT_BOX}.sha385"
-sha512sum "${OPENWRT_BOX}" |cut -f 1 >>"${OPENWRT_BOX}.sha512"
+    --output "${OPENWRT_BOX}"
+
+echo "Calculating checksums of the box"
+cat >${OPENWRT_BOX}.checksums <<EOF
+SHA-256: $(sha256sum "${OPENWRT_BOX}" |cut -f 1)
+SHA-384: $(sha384sum "${OPENWRT_BOX}" |cut -f 1)
+SHA-512: $(sha512sum "${OPENWRT_BOX}" |cut -f 1)
+EOF
 
 echo "Deleting build VM ${VM_NAME} and VDI image"
 VBoxManage unregistervm "${VM_NAME}" --delete

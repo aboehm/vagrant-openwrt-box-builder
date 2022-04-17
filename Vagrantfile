@@ -15,7 +15,6 @@ Vagrant.configure("2") do |config|
 
   config.vm.provider "virtualbox" do |vb|
     vb.memory = "256"
-    vb.linked_clone = true
   end
 
   config.vm.provider "libvirt" do |lv|

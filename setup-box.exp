@@ -1,0 +1,58 @@
+#!/usr/bin/expect
+
+set timeout 60
+set script_setup_box_sh [open "setup-box.sh"]
+
+spawn socat STDIO tcp4-connect:localhost:22023
+#spawn socat STDIO unix-connect:./serial0
+expect {
+    timeout {
+        exit 1
+    }
+    "OpenWrt" {
+        send "\n"
+    }
+}
+
+expect {
+    timeout {
+        exit 1
+    }
+    "Please press Enter to activate this console." {
+        puts "Instance ready for entering commands.\n"
+    }
+}
+
+send "\n"
+expect {
+    timeout {
+        exit 1
+    }
+    "root@(none):/# " {
+        puts "Connected to shell.\n"
+    }
+}
+
+set timeout 180
+send "cat >setup <<SETUP_EOF\n"
+send [read $script_setup_box_sh]
+send "SETUP_EOF\n"
+
+expect {
+    timeout {  
+        exit 1
+    }
+    "root@(none):/# " {
+        puts "Setup script ready.\n"
+    }
+}
+
+send "sh ./setup\n"
+expect {
+    timeout {  
+        exit 1
+    }
+    "#####FINISHED#####" {
+        puts "Setup finished.\n"
+    }
+}
