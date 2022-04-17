@@ -3,7 +3,8 @@
 
 # Build
 /openwrt-*.img
+/openwrt-*.img.gz
 /OpenWRT-*.vdi
 /OpenWRT-*.box
-/OpenWRT-*.box.sha*
+/OpenWRT-*.box.checksums
 /serial0
